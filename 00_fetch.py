@@ -34,6 +34,7 @@ class TACScraper:
             }
         )
         self.papers = []
+        self.existing_papers = self.load_existing_papers()
 
     def get_page(self, url):
         """Get a page with error handling and retries"""
@@ -51,16 +52,42 @@ class TACScraper:
                 time.sleep(2**attempt)  # Exponential backoff
         return None
 
+    def load_existing_papers(self, filename="tac.json"):
+        """Load existing papers from JSON file to avoid re-scraping"""
+        try:
+            with open(filename, "r", encoding="utf-8") as f:
+                existing_data = json.load(f)
+                # Create a set of existing URLs for fast lookup
+                existing_urls = {paper.get("url", "") for paper in existing_data}
+                logger.info(f"Loaded {len(existing_data)} existing papers from {filename}")
+                return existing_urls
+        except (FileNotFoundError, json.JSONDecodeError, KeyError):
+            logger.info(f"No existing papers file found or invalid format, starting fresh")
+            return set()
+
+    def is_paper_already_scraped(self, url):
+        """Check if a paper URL has already been scraped"""
+        return url in self.existing_papers
+
     def extract_paper_links(self, html_content):
         """Extract paper links from the main TAC page"""
         soup = BeautifulSoup(html_content, "html.parser")
         paper_links = []
 
-        # Look for links that match the pattern volumes/VOLUME_ID/PAPER_ID
+        # Look for links that match the criteria:
+        # - href starts with 'volumes'
+        # - href ends with 'abs.html'
+        # - link text is 'abstract'
         for link in soup.find_all("a", href=True):
             href = link["href"]
-            # Check if it's a paper link (e.g., volumes/44/1/44-01abs.html)
-            if re.match(r"volumes/\d+/\d+/.*\.html", href):
+            link_text = link.get_text(strip=True)
+
+            # Check if it matches the required pattern
+            if (
+                href.startswith("volumes")
+                and href.endswith("abs.html")
+                and link_text == "abstract"
+            ):
                 paper_links.append(href)
 
         return list(set(paper_links))  # Remove duplicates
@@ -106,8 +133,16 @@ class TACScraper:
             logger.info(f"Limiting to first {limit} papers for development")
 
         # Scrape each paper
+        skipped_count = 0
         for i, link in enumerate(paper_links):
             full_url = urljoin(self.base_url, link)
+            
+            # Check if paper is already scraped
+            if self.is_paper_already_scraped(full_url):
+                logger.info(f"Skipping already scraped paper {i+1}/{len(paper_links)}: {full_url}")
+                skipped_count += 1
+                continue
+                
             logger.info(f"Scraping paper {i+1}/{len(paper_links)}: {full_url}")
 
             # Get paper page
@@ -120,15 +155,26 @@ class TACScraper:
                 logger.warning(f"Failed to scrape paper: {full_url}")
 
             # Be respectful with rate limiting
-            time.sleep(1)
+            # time.sleep(1)
 
-        logger.info(f"Scraping completed. Total papers scraped: {len(self.papers)}")
+        logger.info(f"Scraping completed. Total papers scraped: {len(self.papers)}, skipped: {skipped_count}")
 
     def save_to_json(self, filename="tac.json"):
-        """Save scraped data to JSON file"""
+        """Save scraped data to JSON file, appending to existing data"""
+        try:
+            # Load existing papers
+            with open(filename, "r", encoding="utf-8") as f:
+                existing_papers = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            existing_papers = []
+        
+        # Combine existing and new papers
+        all_papers = existing_papers + self.papers
+        
+        # Save combined data
         with open(filename, "w", encoding="utf-8") as f:
-            json.dump(self.papers, f, indent=2, ensure_ascii=False)
-        logger.info(f"Data saved to {filename}")
+            json.dump(all_papers, f, indent=2, ensure_ascii=False)
+        logger.info(f"Data saved to {filename} (total: {len(all_papers)} papers)")
 
     def run(self, limit=None):
         """Run the complete scraping process"""
@@ -181,6 +227,14 @@ def main():
                 f"Volume: {first_paper['volume_id']}, Paper: {first_paper['paper_id']}"
             )
             print(f"Raw text length: {len(first_paper['raw_text'])} characters")
+        
+        # Show total papers in the file
+        try:
+            with open("tac.json", "r", encoding="utf-8") as f:
+                all_papers = json.load(f)
+                print(f"\nTotal papers in tac.json: {len(all_papers)}")
+        except (FileNotFoundError, json.JSONDecodeError):
+            print(f"\nTotal papers in tac.json: {len(papers)}")
     else:
         print("Scraping failed. Check the logs for details.")
 
